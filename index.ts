@@ -68,6 +68,7 @@ interface AgentViewModel extends AgentRecord {
 	statusKind: "running" | "exited" | "killed" | "missing" | "failed" | "unknown";
 	activity: AgentActivity;
 	conversationMessages: string[];
+	latestMessage: string;
 	window?: TmuxWindowInfo;
 	panePreview?: string[];
 }
@@ -326,27 +327,39 @@ function stripPromptFileMarkup(text: string): string {
 	return text.replace(/<file name=["'][^"']+["']>\s*([\s\S]*?)\s*<\/file>/g, "$1");
 }
 
-function formatConversationLine(role: string, text: string): string | null {
-	const normalizedRole = role === "assistant" || role === "user" ? role : "";
-	if (!normalizedRole) return null;
+function formatAgentMessageLine(role: string, text: string): string | null {
+	const normalizedRole = role === "toolResult" ? "tool" : role;
+	if (normalizedRole !== "assistant" && normalizedRole !== "user" && normalizedRole !== "tool") return null;
 	const compact = compactText(stripPromptFileMarkup(text));
 	return compact ? `${normalizedRole}: ${compact}` : null;
+}
+
+function formatConversationLine(role: string, text: string): string | null {
+	if (role !== "assistant" && role !== "user") return null;
+	return formatAgentMessageLine(role, text);
 }
 
 function sessionEntryConversationLine(entry: any): string | null {
 	if (entry?.type !== "message") return null;
 	const message = entry.message;
 	const role = messageRole(message);
-	if (role !== "assistant" && role !== "user") return null;
 	return formatConversationLine(role, messageText(message));
 }
 
-function activityConversationMessages(activity: AgentActivity | null, limit = 6): string[] {
+function sessionEntryActivityLine(entry: any): string | null {
+	if (entry?.type !== "message") return null;
+	const message = entry.message;
+	return formatAgentMessageLine(messageRole(message), messageText(message));
+}
+
+function activityMessageLines(activity: AgentActivity | null, limit = 6): string[] {
 	const messages = activity?.latestMessages ?? [];
 	return messages
 		.map((line) => {
-			const match = /^(user|assistant):\s*(.*)$/i.exec(line);
-			return match ? formatConversationLine(match[1].toLowerCase(), match[2]) : null;
+			const match = /^(user|assistant|tool|toolResult):\s*(.*)$/i.exec(line);
+			if (match) return formatAgentMessageLine(match[1].toLowerCase(), match[2]);
+			const compact = compactText(stripPromptFileMarkup(line));
+			return compact ? `assistant: ${compact}` : null;
 		})
 		.filter((line): line is string => Boolean(line))
 		.slice(-limit);
@@ -356,14 +369,19 @@ function isPaneUiLine(line: string): boolean {
 	const text = compactText(line, 500);
 	if (!text) return true;
 	if (/^[─━═\-]{5,}$/.test(text)) return true;
+	if (/^[╭╮╰╯│├└┌┐┘┬┴┼]/.test(text)) return true;
+	if (/^[●◐✓✗]\s*(Todos?|#\d+)/i.test(text)) return true;
 	if (/^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]\s*Working/i.test(text)) return true;
 	if (/\bWorking\.\.\.|\bElapsed\s+\d|\bPress ctrl\+o\b|\bescape interrupt\b/i.test(text)) return true;
 	if (/\b\d+(?:\.\d+)?%\/[\d.]+[KMG]?\b/.test(text)) return true;
 	if (/\((?:anthropic|openai|openai-codex|google|deepseek)\)\s+\S+\s+•/i.test(text)) return true;
 	if (/^\[?(?:Context|Skills|Extensions|Commands)\]?$/i.test(text)) return true;
+	if (/^(?:Observational memory|Codex usage limit|LSP Active|agents:|spawned ·|↳ spawned|pi-lens)\b/i.test(text)) return true;
+	if (/^↳ spawned pi-para-agent /i.test(text)) return true;
 	if (/^pi v\d+\.\d+\.\d+/i.test(text)) return true;
 	if (/^Warning: tmux /i.test(text)) return true;
 	if (/^~\/|^\/.*\([^)]*\)$/.test(text)) return true;
+	if (/^(?:prompt file|session file|inherited pi args|cwd|Log|Run pi --session):/i.test(text)) return true;
 	return false;
 }
 
@@ -371,14 +389,32 @@ function paneConversationMessages(panePreview: string[], limit = 6): string[] {
 	return panePreview
 		.map((line) => compactText(stripPromptFileMarkup(line)))
 		.filter((line) => line && !isPaneUiLine(line))
-		.map((line) => (/^(user|assistant):/i.test(line) ? line : `assistant: ${line}`))
+		.map((line) => (/^(user|assistant|tool):/i.test(line) ? line : `assistant: ${line}`))
 		.slice(-limit);
+}
+
+function isPaneHeadingCandidate(line: string): boolean {
+	if (line.length < 4 || line.length > 100) return false;
+	if (/[.!?]$/.test(line)) return false;
+	if (/^[`{}[\],]/.test(line)) return false;
+	if (/^\^|^\d+\.\s|^[-+*/]/.test(line)) return false;
+	if (/^["']?\w+["']?\s*:/.test(line)) return false;
+	if (/^\w+(?:\.\w+)*\s*[+&|=<>]/.test(line)) return false;
+	return true;
+}
+
+function paneLatestMessageLine(panePreview: string[]): string | null {
+	const lines = panePreview.map((line) => compactText(stripPromptFileMarkup(line))).filter((line) => line && !isPaneUiLine(line));
+	if (lines.length === 0) return null;
+	const heading = [...lines].reverse().find(isPaneHeadingCandidate);
+	return formatAgentMessageLine("assistant", heading ?? lines[lines.length - 1]);
 }
 
 async function readSessionConversation(record: AgentRecord, limit = 6): Promise<{ messages: string[]; activity: AgentActivity | null }> {
 	try {
 		const raw = await fs.readFile(agentSessionPath(record), "utf8");
 		const messages: string[] = [];
+		const activityMessages: string[] = [];
 		let lastRole = "";
 		let lastAssistantText = "";
 		let lastAssistantStopReason = "";
@@ -399,6 +435,8 @@ async function readSessionConversation(record: AgentRecord, limit = 6): Promise<
 				}
 				const lineText = sessionEntryConversationLine(parsed);
 				if (lineText && messages[messages.length - 1] !== lineText) messages.push(lineText);
+				const activityLine = sessionEntryActivityLine(parsed);
+				if (activityLine && activityMessages[activityMessages.length - 1] !== activityLine) activityMessages.push(activityLine);
 			} catch {
 				// Ignore partial or malformed JSONL lines while a child session is writing.
 			}
@@ -411,21 +449,21 @@ async function readSessionConversation(record: AgentRecord, limit = 6): Promise<
 				kind: needsResponse ? "needs-response" : "idle",
 				detail: needsResponse ? "waiting for user" : "waiting",
 				updatedAt: new Date().toISOString(),
-				latestMessages: messages.slice(-4),
+				latestMessages: activityMessages.slice(-4),
 			};
 		} else if (lastRole) {
 			activity = {
 				kind: "in-progress",
 				detail: lastRole === "assistant" && lastAssistantStopReason === "toolUse" ? "using tool" : lastRole === "tool" ? "processing tool result" : "processing prompt",
 				updatedAt: new Date().toISOString(),
-				latestMessages: messages.slice(-4),
+				latestMessages: activityMessages.slice(-4),
 			};
 		} else if (lastMessageText) {
 			activity = {
 				kind: "in-progress",
 				detail: "processing prompt",
 				updatedAt: new Date().toISOString(),
-				latestMessages: messages.slice(-4),
+				latestMessages: activityMessages.slice(-4),
 			};
 		}
 
@@ -672,13 +710,13 @@ async function listTmuxWindows(pi: ExtensionAPI): Promise<Map<string, TmuxWindow
 }
 
 async function capturePanePreview(pi: ExtensionAPI, windowId: string): Promise<string[]> {
-	const result = await runTmux(pi, ["capture-pane", "-p", "-t", windowId, "-S", "-18"], { allowFailure: true });
+	const result = await runTmux(pi, ["capture-pane", "-p", "-t", windowId, "-S", "-80"], { allowFailure: true });
 	if (result.code !== 0) return [];
 	const lines = result.stdout
 		.split("\n")
 		.map((line) => stripControlSequences(line).trimEnd())
 		.filter((line) => line.trim().length > 0);
-	return lines.slice(-8);
+	return lines.slice(-60);
 }
 
 async function currentTmuxSession(pi: ExtensionAPI): Promise<string | null> {
@@ -918,23 +956,26 @@ async function listAgents(pi: ExtensionAPI, cwdFilter?: string): Promise<AgentVi
 		const statusKind = classifyStatus(rawStatus, Boolean(window));
 		const panePreview = window ? await capturePanePreview(pi, record.tmuxWindowId) : [];
 		const sessionConversation = await readSessionConversation(record);
-		const activity =
-			statusKind === "running" && sessionConversation.activity
-				? sessionConversation.activity
-				: reconcileActivity(rawStatus, statusKind, Boolean(window), panePreview, await readActivity(record));
-		const activityConversation = activityConversationMessages(activity);
+		const storedActivity = await readActivity(record);
+		const reconciledActivity = reconcileActivity(rawStatus, statusKind, Boolean(window), panePreview, storedActivity);
+		const shouldTrustLiveActivity = paneLooksBusy(panePreview) || (storedActivity?.kind === "in-progress" && activityAgeMs(storedActivity) <= 15000);
+		const activity = statusKind === "running" && sessionConversation.activity && !shouldTrustLiveActivity ? sessionConversation.activity : reconciledActivity;
+		const activityLines = activityMessageLines(activity);
+		const paneMessages = paneConversationMessages(panePreview);
 		const conversationMessages =
 			sessionConversation.messages.length > 0
 				? sessionConversation.messages
-				: activityConversation.length > 0
-					? activityConversation
-					: paneConversationMessages(panePreview);
+				: activityLines.length > 0
+					? activityLines
+					: paneMessages;
+		const latestMessage = chooseLatestMessage(activity, activityLines, conversationMessages, paneLatestMessageLine(panePreview));
 		agents.push({
 			...record,
 			status: rawStatus,
 			statusKind,
 			activity,
 			conversationMessages,
+			latestMessage,
 			window,
 			panePreview,
 		});
@@ -1094,8 +1135,20 @@ function activityColor(theme: any, activity: AgentActivity, text: string): strin
 	}
 }
 
-function activityMessages(agent: AgentViewModel, limit = 2): string[] {
-	return agent.conversationMessages.slice(-limit);
+function latestNonUserLine(lines: string[]): string | null {
+	return [...lines].reverse().find((line) => !/^user:/i.test(line)) ?? lines[lines.length - 1] ?? null;
+}
+
+function chooseLatestMessage(
+	activity: AgentActivity,
+	activityLines: string[],
+	sessionLines: string[],
+	paneLatest: string | null,
+): string {
+	if (activity.kind === "in-progress") {
+		return paneLatest ?? latestNonUserLine(activityLines) ?? latestNonUserLine(sessionLines) ?? "agent is working";
+	}
+	return latestNonUserLine(sessionLines) ?? latestNonUserLine(activityLines) ?? paneLatest ?? "no activity yet";
 }
 
 function padToVisibleWidth(line: string, width: number): string {
@@ -1188,19 +1241,11 @@ class AgentListView {
 			const state = activityColor(this.theme, agent.activity, activityLabel(agent.activity));
 			const age = this.theme.fg("dim", formatAge(agent.createdAt));
 			const window = agent.window ? this.theme.fg("muted", `${agent.tmuxSession}:${agent.window.windowName}`) : this.theme.fg("dim", "no-window");
-			const firstLine = `${prefix} ${icon} ${id} ${state} ${age} ${window}`;
-			lines.push(truncateToWidth(firstLine, innerWidth));
 			const detail = agent.activity.detail ? `${this.theme.fg("muted", " · ")}${this.theme.fg("dim", agent.activity.detail)}` : "";
-			const prompt = `  ${this.theme.fg("dim", agent.cwd)} ${this.theme.fg("muted", "—")} ${agent.promptPreview}${detail}`;
-			lines.push(truncateToWidth(prompt, innerWidth));
-			const recentMessages = activityMessages(agent, selected ? 6 : 2);
-			if (recentMessages.length > 0) {
-				for (const line of recentMessages) {
-					lines.push(truncateToWidth(`    ${this.theme.fg("muted", line)}`, innerWidth));
-				}
-			} else {
-				lines.push(truncateToWidth(`    ${this.theme.fg("dim", "no conversation messages yet")}`, innerWidth));
-			}
+			const firstLine = `${prefix} ${icon} ${id} ${state}${detail} ${age} ${window}`;
+			lines.push(truncateToWidth(firstLine, innerWidth));
+			const latest = agent.latestMessage || "no activity yet";
+			lines.push(truncateToWidth(`  ${this.theme.fg("dim", "latest:")} ${this.theme.fg("muted", latest)}`, innerWidth));
 		}
 
 		this.cachedWidth = width;
