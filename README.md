@@ -26,7 +26,7 @@ pi -e git:github.com/bdatdo0601/pi-para-agents
   - `k` kill selected agent
   - `r` refresh
   - `q` or `esc` close
-- `/agent-attach <id>` — open a live agent in this terminal by id prefix. Inside tmux it switches to the agent window; outside tmux it suspends the parent Pi TUI and runs `tmux attach` until you detach.
+- `/agent-attach <id>` — open a live agent in this terminal by id prefix. Inside tmux it switches to the agent window; outside tmux it hands the terminal to `tmux attach` until you detach, then resumes the parent Pi TUI.
 - `/kill-agent <id>` — kill an agent by id prefix.
 - `/kill-all-agents [cwd|--all]` — kill every tracked agent for the current cwd by default. Pass a cwd to scope it, or `--all` to kill agents across every cwd.
 
@@ -34,7 +34,7 @@ pi -e git:github.com/bdatdo0601/pi-para-agents
 
 - If pi is already inside tmux, agents are spawned as new windows in the current tmux session.
 - If pi is not inside tmux, agents are spawned in a detached session named `pi-agents`.
-- When `/agent-attach` opens a detached tmux session, detach with your tmux prefix then `d` to return to the parent Pi terminal.
+- When `/agent-attach` opens a detached tmux session, detach with your tmux prefix then `d` to return to the parent Pi terminal. The parent Pi UI is suspended while the same terminal is attached to tmux; the parent process/event loop is not synchronously blocked.
 - Inside spawned agents, the extension shows a startup notification plus a below-editor hint explaining how to return (`ctrl+t d` for detached sessions, `ctrl+t l`/window switch when spawned inside the same tmux session). Bare `/agent-list` inside a spawned agent uses that agent's original cwd, so it shows sibling agents for the same project even if Pi reports a different session cwd.
 - Spawned agents inherit parent CLI resource flags for extensions, skills, prompt templates, themes, context-file/tool toggles, and explicit tool allowlists. They also explicitly pass the parent session's loaded extension paths and active tool allowlist (`--tools ...`) so agents launched after `/reload` get the same extension tools/commands.
 - `/para-fork` additionally writes a child session file containing the current active parent session branch (falling back to all known entries if no leaf is selected). The child session header points back to the parent session via `parentSession`, so Pi's tree/session lineage remains intact.

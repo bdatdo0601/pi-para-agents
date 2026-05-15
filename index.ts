@@ -1,4 +1,4 @@
-import { spawnSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import * as fs from "node:fs/promises";
@@ -1020,16 +1020,30 @@ async function attachAgent(
 
 	const exitCode = await ctx.ui.custom((tui: any, _theme: any, _keybindings: any, done: any) => {
 		// Release Pi's TUI so tmux can own this terminal until the user detaches.
+		// Keep the parent Pi process/event loop alive while attached; only the terminal UI is suspended.
 		tui.stop();
 		process.stdout.write("\x1b[2J\x1b[H");
-		process.stdout.write(`Attaching to agent ${agent.id}. Detach with tmux prefix then d.\n\n`);
-		const result = spawnSync("tmux", ["attach-session", "-t", agent.tmuxSession], {
+		process.stdout.write(`Attaching to agent ${agent.id}. Detach with tmux prefix then d.\n`);
+		process.stdout.write("Parent Pi UI is suspended while this terminal is attached; detach to resume it.\n\n");
+		const child = spawn("tmux", ["attach-session", "-t", agent.tmuxSession], {
 			stdio: "inherit",
 			env: process.env,
 		});
-		tui.start();
-		tui.requestRender(true);
-		done(typeof result.status === "number" ? result.status : 1);
+		let settled = false;
+		const finish = (code: number) => {
+			if (settled) return;
+			settled = true;
+			tui.start();
+			tui.requestRender(true);
+			done(code);
+		};
+		child.once("error", (error) => {
+			process.stderr.write(`tmux attach failed: ${error.message}\n`);
+			finish(1);
+		});
+		child.once("exit", (code, signal) => {
+			finish(typeof code === "number" ? code : signal ? 1 : 0);
+		});
 		return { render: () => [], invalidate: () => {} };
 	});
 
