@@ -41,7 +41,7 @@ pi -e git:github.com/bdatdo0601/pi-para-agents
 - Agent metadata, prompt files, status files, logs, and per-agent pi session files live under `~/.pi/agent/pi-para-agents/`.
 - Existing state from `~/.pi/agent/tmux-agents/` is migrated automatically on first use.
 - The footer shows `agents:<n>` when there are running agents for the current cwd. Parent `/agent-list` reads child activity updates from `activity.json`, session history, and filtered tmux pane output to show in-progress/idle/needs-response state plus each agent's latest useful message.
-- Killed agents are removed from the registry immediately; their state directory is left on disk for log/session inspection.
+- Killed agents are removed from the registry immediately; their state directory is left on disk for log/session inspection. If an agent tmux pane/window is killed outside `/kill-agent`, the next `/agent-list` refresh prunes it from the registry too.
 
 ## Environment variables
 

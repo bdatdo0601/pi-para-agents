@@ -43,6 +43,11 @@ interface TmuxWindowInfo {
 	paneDead: boolean;
 }
 
+interface TmuxWindowsResult {
+	windows: Map<string, TmuxWindowInfo>;
+	ok: boolean;
+}
+
 type AgentActivityKind = "starting" | "in-progress" | "idle" | "needs-response" | "done" | "failed" | "missing" | "unknown";
 
 interface AgentActivity {
@@ -666,6 +671,13 @@ function classifyStatus(rawStatus: string, hasWindow: boolean): AgentViewModel["
 	return "unknown";
 }
 
+function shouldPruneDeadRecord(statusKind: AgentViewModel["statusKind"], window: TmuxWindowInfo | undefined, tmuxListSucceeded: boolean): boolean {
+	if (statusKind === "killed") return true;
+	if (window?.paneDead) return true;
+	if (!window && tmuxListSucceeded) return true;
+	return false;
+}
+
 async function runTmux(
 	pi: ExtensionAPI,
 	args: string[],
@@ -686,14 +698,14 @@ async function tmuxServerAvailable(pi: ExtensionAPI): Promise<boolean> {
 	return result.code === 0;
 }
 
-async function listTmuxWindows(pi: ExtensionAPI): Promise<Map<string, TmuxWindowInfo>> {
+async function listTmuxWindowsResult(pi: ExtensionAPI): Promise<TmuxWindowsResult> {
 	const result = await runTmux(
 		pi,
 		["list-windows", "-a", "-F", "#{session_name}\t#{window_id}\t#{window_name}\t#{pane_current_command}\t#{pane_dead}"],
 		{ allowFailure: true },
 	);
 	const windows = new Map<string, TmuxWindowInfo>();
-	if (result.code !== 0) return windows;
+	if (result.code !== 0) return { windows, ok: false };
 	for (const line of result.stdout.split("\n")) {
 		if (!line.trim()) continue;
 		const [session, windowId, windowName, paneCommand, paneDead] = line.split("\t");
@@ -706,7 +718,11 @@ async function listTmuxWindows(pi: ExtensionAPI): Promise<Map<string, TmuxWindow
 			paneDead: paneDead === "1",
 		});
 	}
-	return windows;
+	return { windows, ok: true };
+}
+
+async function listTmuxWindows(pi: ExtensionAPI): Promise<Map<string, TmuxWindowInfo>> {
+	return (await listTmuxWindowsResult(pi)).windows;
 }
 
 async function capturePanePreview(pi: ExtensionAPI, windowId: string): Promise<string[]> {
@@ -946,7 +962,8 @@ async function defaultAgentListCwd(ctx: any): Promise<string> {
 
 async function listAgents(pi: ExtensionAPI, cwdFilter?: string): Promise<AgentViewModel[]> {
 	const records = await loadRecords();
-	const windows = await listTmuxWindows(pi);
+	const tmuxWindows = await listTmuxWindowsResult(pi);
+	const windows = tmuxWindows.windows;
 	const normalizedFilter = cwdFilter ? path.resolve(cwdFilter) : undefined;
 	const agents: AgentViewModel[] = [];
 	for (const record of records) {
@@ -954,6 +971,13 @@ async function listAgents(pi: ExtensionAPI, cwdFilter?: string): Promise<AgentVi
 		const window = windows.get(record.tmuxWindowId);
 		const rawStatus = await readStatus(record);
 		const statusKind = classifyStatus(rawStatus, Boolean(window));
+		if (shouldPruneDeadRecord(statusKind, window, tmuxWindows.ok)) {
+			if (statusKind === "missing" || statusKind === "killed") {
+				await fs.writeFile(record.statusPath, `${statusKind}\n`, "utf8").catch(() => undefined);
+			}
+			await removeRecord(record.id);
+			continue;
+		}
 		const panePreview = window ? await capturePanePreview(pi, record.tmuxWindowId) : [];
 		const sessionConversation = await readSessionConversation(record);
 		const storedActivity = await readActivity(record);
