@@ -20,7 +20,7 @@ pi -e git:github.com/bdatdo0601/pi-para-agents
 - `/spawn` — open a blank editor for the initial agent prompt, then launch the agent.
 - `/para-fork <prompt>` — create a new tmux agent whose session is forked from the current parent's active Pi session branch, then send the inline prompt.
 - `/para-fork` — open a blank editor, then fork the current session branch into a parallel agent with that prompt.
-- `/agent-list [cwd|--all]` — open a 90%-screen live TUI list of tracked agents. Each row shows a colored tmux badge dot, the agent state (`in progress`, `idle`, or `needs response`), and a single `latest:` line with the best current message/action for that agent. Defaults to the current cwd.
+- `/agent-list [cwd|--all]` — open a 90%-screen live TUI list of tracked agents. Each row shows a colored tmux badge dot, the agent state (`in progress`, `idle`, or `needs response`), a `prompt:` line with the latest/current user prompt for that agent, and a `latest:` line with the best current message/action. Defaults to the current cwd.
   - `↑/↓` select
   - `enter` or `a` attach/switch to the agent window
   - `k` kill selected agent
@@ -40,7 +40,7 @@ pi -e git:github.com/bdatdo0601/pi-para-agents
 - `/para-fork` additionally writes a child session file containing the current active parent session branch (falling back to all known entries if no leaf is selected). The child session header points back to the parent session via `parentSession`, so Pi's tree/session lineage remains intact.
 - Agent metadata, prompt files, status files, logs, and per-agent pi session files live under `~/.pi/agent/pi-para-agents/`.
 - Existing state from `~/.pi/agent/tmux-agents/` is migrated automatically on first use.
-- The footer shows `agents:<n>` when there are running agents for the current cwd. Parent `/agent-list` reads child activity updates from `activity.json`, session history, and filtered tmux pane output to show in-progress/idle/needs-response state plus each agent's latest useful message.
+- The footer shows `agents:<n>` when there are running agents for the current cwd using a lightweight tmux/status-file count. Parent `/agent-list` does the heavier read of child `activity.json`, session history, and filtered tmux pane output to show in-progress/idle/needs-response state, current prompt, and each agent's latest useful message.
 - Killed agents are removed from the registry immediately; their state directory is left on disk for log/session inspection. If an agent tmux pane/window is killed outside `/kill-agent`, the next `/agent-list` refresh prunes it from the registry too.
 
 ## Environment variables

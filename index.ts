@@ -73,6 +73,7 @@ interface AgentViewModel extends AgentRecord {
 	statusKind: "running" | "exited" | "killed" | "missing" | "failed" | "unknown";
 	activity: AgentActivity;
 	conversationMessages: string[];
+	currentPrompt: string;
 	latestMessage: string;
 	window?: TmuxWindowInfo;
 	panePreview?: string[];
@@ -415,7 +416,7 @@ function paneLatestMessageLine(panePreview: string[]): string | null {
 	return formatAgentMessageLine("assistant", heading ?? lines[lines.length - 1]);
 }
 
-async function readSessionConversation(record: AgentRecord, limit = 6): Promise<{ messages: string[]; activity: AgentActivity | null }> {
+async function readSessionConversation(record: AgentRecord, limit = 6): Promise<{ messages: string[]; activity: AgentActivity | null; currentPrompt: string }> {
 	try {
 		const raw = await fs.readFile(agentSessionPath(record), "utf8");
 		const messages: string[] = [];
@@ -424,6 +425,7 @@ async function readSessionConversation(record: AgentRecord, limit = 6): Promise<
 		let lastAssistantText = "";
 		let lastAssistantStopReason = "";
 		let lastMessageText = "";
+		let lastUserPrompt = "";
 		for (const line of raw.split("\n")) {
 			if (!line.trim()) continue;
 			try {
@@ -434,6 +436,9 @@ async function readSessionConversation(record: AgentRecord, limit = 6): Promise<
 				const text = stripPromptFileMarkup(messageText(message));
 				lastRole = role;
 				lastMessageText = text;
+				if (role === "user") {
+					lastUserPrompt = text;
+				}
 				if (role === "assistant") {
 					lastAssistantText = text;
 					lastAssistantStopReason = String(message?.stopReason ?? "");
@@ -472,9 +477,9 @@ async function readSessionConversation(record: AgentRecord, limit = 6): Promise<
 			};
 		}
 
-		return { messages: messages.slice(-limit), activity };
+		return { messages: messages.slice(-limit), activity, currentPrompt: compactText(lastUserPrompt) };
 	} catch {
-		return { messages: [], activity: null };
+		return { messages: [], activity: null, currentPrompt: "" };
 	}
 }
 
@@ -992,6 +997,7 @@ async function listAgents(pi: ExtensionAPI, cwdFilter?: string): Promise<AgentVi
 				: activityLines.length > 0
 					? activityLines
 					: paneMessages;
+		const currentPrompt = sessionConversation.currentPrompt || record.promptPreview || "no prompt recorded";
 		const latestMessage = chooseLatestMessage(activity, activityLines, conversationMessages, paneLatestMessageLine(panePreview));
 		agents.push({
 			...record,
@@ -999,6 +1005,7 @@ async function listAgents(pi: ExtensionAPI, cwdFilter?: string): Promise<AgentVi
 			statusKind,
 			activity,
 			conversationMessages,
+			currentPrompt,
 			latestMessage,
 			window,
 			panePreview,
@@ -1282,6 +1289,8 @@ class AgentListView {
 			const detail = agent.activity.detail ? `${this.theme.fg("muted", " · ")}${this.theme.fg("dim", agent.activity.detail)}` : "";
 			const firstLine = `${prefix} ${icon} ${id} ${state}${detail} ${age} ${window}`;
 			lines.push(truncateToWidth(firstLine, innerWidth));
+			const prompt = agent.currentPrompt || "no prompt recorded";
+			lines.push(truncateToWidth(`  ${this.theme.fg("dim", "prompt:")} ${this.theme.fg("muted", prompt)}`, innerWidth));
 			const latest = agent.latestMessage || "no activity yet";
 			lines.push(truncateToWidth(`  ${this.theme.fg("dim", "latest:")} ${this.theme.fg("muted", latest)}`, innerWidth));
 		}
@@ -1373,11 +1382,26 @@ async function showAgentList(ctx: any, pi: ExtensionAPI, cwdFilter?: string): Pr
 	}
 }
 
+async function countLiveAgents(pi: ExtensionAPI, cwdFilter?: string): Promise<number> {
+	const records = await loadRecords();
+	const tmuxWindows = await listTmuxWindowsResult(pi);
+	if (!tmuxWindows.ok) return 0;
+	const normalizedFilter = cwdFilter ? path.resolve(cwdFilter) : undefined;
+	let running = 0;
+	for (const record of records) {
+		if (normalizedFilter && path.resolve(record.cwd) !== normalizedFilter) continue;
+		const window = tmuxWindows.windows.get(record.tmuxWindowId);
+		if (!window || window.paneDead) continue;
+		const rawStatus = await readStatus(record);
+		if (classifyStatus(rawStatus, true) === "running") running++;
+	}
+	return running;
+}
+
 async function updateFooterStatus(pi: ExtensionAPI, ctx: any): Promise<void> {
 	if (!ctx.hasUI) return;
 	const cwd = await defaultAgentListCwd(ctx);
-	const agents = await listAgents(pi, cwd).catch(() => []);
-	const running = agents.filter((agent) => agent.statusKind === "running").length;
+	const running = await countLiveAgents(pi, cwd).catch(() => 0);
 	ctx.ui.setStatus(EXTENSION_NAME, running > 0 ? ctx.ui.theme.fg("accent", `agents:${running}`) : undefined);
 	ctx.ui.setStatus(LEGACY_EXTENSION_NAME, undefined);
 }
